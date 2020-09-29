@@ -22,7 +22,9 @@
 
 package org.pentaho.hadoop.shim;
 
+import org.apache.commons.io.FileUtils;
 import org.apache.commons.vfs2.FileObject;
+import org.apache.commons.vfs2.FileSystemException;
 import org.apache.hadoop.conf.Configuration;
 import org.pentaho.big.data.api.shims.LegacyShimLocator;
 import org.pentaho.di.core.Const;
@@ -34,21 +36,13 @@ import org.pentaho.di.core.plugins.PluginInterface;
 import org.pentaho.di.core.plugins.PluginRegistry;
 import org.pentaho.di.core.vfs.KettleVFS;
 import org.pentaho.di.i18n.BaseMessages;
+import org.pentaho.hadoop.shim.api.cluster.NamedClusterService;
 import org.pentaho.hadoop.shim.api.core.ShimIdentifierInterface;
 import org.pentaho.hadoop.shim.api.cluster.NamedCluster;
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.IOException;
-import java.io.InputStream;
+import java.io.*;
 import java.net.URL;
-import java.util.Arrays;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Properties;
-import java.util.Set;
+import java.util.*;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
@@ -58,8 +52,8 @@ public class ShimConfigsLoader {
   private static final Class<?> PKG = ShimConfigsLoader.class; // for i18n purposes, needed by Translator2!!
   private static LogChannelInterface log = new LogChannel( ShimConfigsLoader.class.getName() );
 
-  public static Set<String> CLUSTER_NAME_FOR_LOGGING = new HashSet<String>();
-  public static Set<String> SITE_FILE_NAME = new HashSet<String>();
+  private static Set<String> CLUSTER_NAME_FOR_LOGGING = new HashSet<String>();
+  private static Set<String> SITE_FILE_NAME = new HashSet<String>();
 
   public static final String CONFIGS_DIR_PREFIX =
     "metastore" + File.separator + "pentaho" + File.separator + "NamedCluster" + File.separator + "Configs";
@@ -69,10 +63,32 @@ public class ShimConfigsLoader {
       getURLToResourceFile( ClusterConfigNames.CONFIGS_PROP.toString(), additionalPath ) );
   }
 
+  // FIXME only expose one public method getURLToResourceFile()
+  public static URL getURLToResourceFile( String siteFileName, NamedCluster namedCluster ) {
+
+    URL url = null;
+    try {
+      //NOTE: try embedded first, then go to previous <9.0 release locations
+       FileObject currentPath = getEmbeddedSiteFile(siteFileName, namedCluster);
+      if (currentPath.exists()) {
+        logFoundFile(currentPath);
+        url =  currentPath.getURL();
+      }
+    } catch (KettleFileException| FileSystemException e) {
+      url = null;
+    }
+    return (url == null) ? getURLToResourceFile(siteFileName, namedCluster.getName()) : url;
+  }
+
   // complexity rule suppressed because the level of nesting is not significant and moving logic to other methods
   // would make it more difficult to trace
   @SuppressWarnings( "squid:S3776" )
   public static URL getURLToResourceFile( String siteFileName, String additionalPath ) {
+
+    log.logBasic(String.format("getURLToResourceFile(additionalPath: %s, siteFileName: %s)", additionalPath, siteFileName ));
+    _logCache();
+    List<String> urls = new ArrayList<>();
+
     try {
       FileObject currentPath = null;
       if ( additionalPath != null && !additionalPath.equals( "" ) ) {
@@ -81,7 +97,8 @@ public class ShimConfigsLoader {
             + File.separator
             + siteFileName );
 
-        if ( currentPath.exists() ) {
+        urls.add(currentPath.getPublicURIString());
+        if ( currentPath.exists() ) { logFoundFile(currentPath);
           return currentPath.getURL();
         }
 
@@ -89,7 +106,8 @@ public class ShimConfigsLoader {
           Const.getUserHomeDirectory() + File.separator + ".pentaho" + File.separator + CONFIGS_DIR_PREFIX
             + File.separator + additionalPath + File.separator
             + siteFileName );
-        if ( currentPath.exists() ) {
+        urls.add(currentPath.getPublicURIString());
+        if ( currentPath.exists() ) { logFoundFile(currentPath);
           return currentPath.getURL();
         }
 
@@ -97,7 +115,8 @@ public class ShimConfigsLoader {
           Const.getUserHomeDirectory() + File.separator + CONFIGS_DIR_PREFIX + File.separator + additionalPath
             + File.separator
             + siteFileName );
-        if ( currentPath.exists() ) {
+        urls.add(currentPath.getPublicURIString());
+        if ( currentPath.exists() ) { logFoundFile(currentPath);
           return currentPath.getURL();
         }
 
@@ -107,7 +126,8 @@ public class ShimConfigsLoader {
           PluginRegistry.getInstance().findPluginWithId( LifecyclePluginType.class, "HadoopSpoonPlugin" );
         currentPath = KettleVFS.getFileObject( pluginInterface.getPluginDirectory().getPath()
           + File.separator + CONFIGS_DIR_PREFIX + File.separator + additionalPath + File.separator + siteFileName );
-        if ( currentPath.exists() ) {
+        urls.add(currentPath.getPublicURIString());
+        if ( currentPath.exists() ) { logFoundFile(currentPath);
           return currentPath.getURL();
         }
       }
@@ -119,21 +139,31 @@ public class ShimConfigsLoader {
           // only return the legacy folder if the shim still exists
           currentPath = KettleVFS.getFileObject(
             LegacyShimLocator.getLegacyDefaultShimDir( defaultShim ) + File.separator + siteFileName );
-          if ( currentPath.exists() ) {
+          urls.add(currentPath.getPublicURIString());
+          if ( currentPath.exists() ) { logFoundFile(currentPath);
             log.logBasic( BaseMessages.getString( PKG, "ShimConfigsLoader.UsingLegacyConfig" ) );
             return currentPath.getURL();
           }
         }
       }
 
-      // Work around to avoid multiple logging for VFS
+      // DEBUG
+      log.logBasic(String.format("error state: additionalPath: %s, siteFileName: %s", additionalPath, siteFileName ));
+      log.logBasic(String.format("TRIED urls: %s", Arrays.toString(urls.toArray())));
+      _logCache();
+
+      Arrays.stream(Thread.currentThread().getStackTrace()).forEach(s -> log.logBasic(
+              "\tat " + s.getClassName() + "." + s.getMethodName() + "(" + s.getFileName() + ":" + s
+                      .getLineNumber() + ")"));
+
+              // Work around to avoid multiple logging for VFS
       if ( ( CLUSTER_NAME_FOR_LOGGING.isEmpty() ) || ( !CLUSTER_NAME_FOR_LOGGING.contains( additionalPath ) ) ) {
         SITE_FILE_NAME.clear();
-        log.logBasic( BaseMessages.getString( PKG, "ShimConfigsLoader.UnableToFindConfigs" ), siteFileName, additionalPath );
+        log.logBasic( "[0]" + BaseMessages.getString( PKG, "ShimConfigsLoader.UnableToFindConfigs" ), siteFileName, additionalPath );
         CLUSTER_NAME_FOR_LOGGING.add( additionalPath );
         SITE_FILE_NAME.add( siteFileName );
       } else if ( ( SITE_FILE_NAME.isEmpty() ) || ( !SITE_FILE_NAME.contains( siteFileName ) ) ) {
-        log.logBasic( BaseMessages.getString( PKG, "ShimConfigsLoader.UnableToFindConfigs" ), siteFileName, additionalPath );
+        log.logBasic( "[1]" + BaseMessages.getString( PKG, "ShimConfigsLoader.UnableToFindConfigs" ), siteFileName, additionalPath );
         SITE_FILE_NAME.add( siteFileName );
       }
 
@@ -245,6 +275,55 @@ public class ShimConfigsLoader {
       }
     }
     return null;
+  }
+
+  //DEBUG
+  public static void _logCache(){
+    log.logBasic(String.format("CLUSTER_NAME_FOR_LOGGING: %s",Arrays.toString(CLUSTER_NAME_FOR_LOGGING.toArray())));
+    log.logBasic(String.format("SITE_FILE_NAME: %s",Arrays.toString(SITE_FILE_NAME.toArray())));
+  }
+
+  protected static FileObject getEmbeddedSiteFile(String siteFileName, NamedCluster namedCluster ) throws KettleFileException {
+
+    InputStream inputStream = namedCluster.getSiteFileInputStream(siteFileName);
+    FileObject tempSiteFileName =  writeToTemporaryFile( inputStream, siteFileName);
+
+    return tempSiteFileName;
+  }
+
+  protected static FileObject writeToTemporaryFile(InputStream inputStream, String fileName) {
+    String tmpdir = System.getProperty("java.io.tmpdir");
+    File tempFile  = new File( tmpdir + File.separator + "embeddedSiteFiles" + File.separator + fileName); // TODO ?? include random hash
+    tempFile.deleteOnExit();
+    FileObject fileObject = null;
+    try{
+      FileUtils.copyInputStreamToFile(inputStream, tempFile);
+      fileObject = KettleVFS.getFileObject(tempFile.getAbsolutePath());
+    }
+    catch( IOException| KettleFileException e){
+      fileObject = null;
+    }
+
+    return fileObject;
+  }
+
+
+  public static void logFoundFile(FileObject currentPath){
+    String strUrl = null;
+    try{
+      strUrl = currentPath.getURL().toString();
+    }
+    catch(Exception e){
+      strUrl = "<error>";
+    }
+
+    log.logBasic(String.format(String.format("FOUND FILE url: %s, publicURIString: %s ", strUrl, currentPath.getPublicURIString())));
+  }
+
+  public static void clear(){
+    log.logBasic("CLEAR()!!!");
+    CLUSTER_NAME_FOR_LOGGING.clear();
+    SITE_FILE_NAME.clear();
   }
 
   public enum ClusterConfigNames {

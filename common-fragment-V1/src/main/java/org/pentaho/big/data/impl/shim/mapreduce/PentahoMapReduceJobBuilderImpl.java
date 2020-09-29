@@ -620,7 +620,7 @@ public class PentahoMapReduceJobBuilderImpl extends MapReduceJobBuilderImpl impl
     boolean stagingExists;
     try {
       configFileLocation =
-        ShimConfigsLoader.getURLToResourceFile( configFileName, getClusterName() ).toURI();
+        ShimConfigsLoader.getURLToResourceFile( configFileName, getNamedCluster() ).toURI();
       configFileSource = new File( configFileLocation );
       stagingExists = true;
       if ( !configFilesStagingLocation.exists() ) {

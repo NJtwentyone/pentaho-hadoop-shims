@@ -57,8 +57,7 @@ public class ConfigurationProxyV2 implements Configuration {
     job = Job.getInstance();
 
     // Reset static HashSets for logging
-    ShimConfigsLoader.CLUSTER_NAME_FOR_LOGGING.clear();
-    ShimConfigsLoader.SITE_FILE_NAME.clear();
+    ShimConfigsLoader.clear();
 
     addConfigsForJobConf( namedCluster );
   }
